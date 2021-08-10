@@ -19,6 +19,7 @@
 #include "swift/AST/GenericParamList.h"
 #include "swift/AST/Module.h"
 #include "swift/AST/ParameterList.h"
+#include "swift/AST/Pattern.h"
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/SourceFile.h"
 #include "swift/AST/TypeRepr.h"
@@ -153,6 +154,15 @@ class IndexSwiftASTWalker : public SourceEntityWalker {
 
   bool IsModuleFile = false;
   bool isSystemModule = false;
+  struct ContainerStackEntry {
+    // An entry can have more than one declaration when a pattern binding
+    // contains a tuple, e.g let (a, b) = (0, 0). This vector capacity therefore
+    // represents the number of tuple elements that can be reasonably expected
+    // in the majority of cases.
+    SmallVector<Decl *, 6> Decls;
+    Decl *AncestorDecl;
+  };
+  SmallVector<ContainerStackEntry, 4> ContainerStack;
   struct Entity {
     Decl *D;
     SymbolInfo SymInfo;
@@ -291,6 +301,7 @@ public:
   ~IndexSwiftASTWalker() override {
     assert(Cancelled || EntitiesStack.empty());
     assert(Cancelled || ManuallyVisitedAccessorStack.empty());
+    assert(Cancelled || ContainerStack.empty());
   }
 
   void visitModule(ModuleDecl &Mod);
@@ -440,6 +451,43 @@ private:
     return true;
   }
 
+  /// This method identifies containing declarations. Any references that are
+  /// associated with these declarations will obtain the \c RelationContainedBy
+  /// role.
+  ///
+  /// The use of \c PatternBindingDecl here ensures that variable declarations
+  /// will contain references to explicit types, initializers, custom
+  /// attributes, etc.
+  ///
+  /// Note that any single entry into the \c ContainerStack may have multiple
+  /// declarations, such is the case for a tuple, e.g:
+  /// let (a, b): (Int, String) = (x, y)
+  /// Currently both \c a and \c b will contain references to \c Int, \c String,
+  /// \c x and \c y. Future work could improve upon this to try match up the
+  /// indices, such that \c a would only contain references to \c Int and \c x,
+  /// and \c b references to \c String and \c y.
+  void beginBalancedDeclVisit(Decl *D) override {
+    if (auto *PBD = dyn_cast<PatternBindingDecl>(D)) {
+      SmallVector<Decl *, 6> VDs;
+      for (auto i : range(PBD->getNumPatternEntries())) {
+        PBD->getPattern(i)->forEachVariable(
+            [&](VarDecl *VD) { VDs.push_back(VD); });
+      }
+
+      if (VDs.size() > 0)
+        ContainerStack.push_back({VDs, D});
+    } else if (auto *AFD = dyn_cast<AbstractFunctionDecl>(D)) {
+      ContainerStack.push_back({{AFD}, D});
+    }
+  }
+
+  void endBalancedDeclVisit(Decl *D) override {
+    if (ContainerStack.empty())
+      return;
+    if (ContainerStack.back().AncestorDecl == D)
+      ContainerStack.pop_back();
+  }
+
   /// Extensions redeclare all generic parameters of their extended type to add
   /// their additional restrictions. There are two issues with this model for
   /// indexing:
@@ -541,9 +589,7 @@ private:
     Info.roles |= (unsigned)SymbolRole::Reference;
     Info.symInfo = getSymbolInfoForModule(Mod);
     getModuleNameAndUSR(Mod, Info.name, Info.USR);
-
-    if (auto Container = getContainingDecl())
-      addRelation(Info, (unsigned)SymbolRole::RelationContainedBy, Container);
+    addContainedByRelationIfContained(Info);
 
     if (!IdxConsumer.startSourceEntity(Info)) {
       Cancelled = true;
@@ -566,14 +612,12 @@ private:
     return nullptr;
   }
 
-  Decl *getContainingDecl() const {
-    for (const auto &Entity: EntitiesStack) {
-      if (isa<AbstractFunctionDecl>(Entity.D) &&
-          (Entity.Roles & (SymbolRoleSet)SymbolRole::Definition)) {
-        return Entity.D;
-      }
+  void addContainedByRelationIfContained(IndexSymbol &Info) {
+    if (ContainerStack.empty())
+      return;
+    for (auto *D : ContainerStack.back().Decls) {
+      addRelation(Info, (unsigned)SymbolRole::RelationContainedBy, D);
     }
-    return nullptr;
   }
 
   void repressRefAtLoc(SourceLoc Loc) {
@@ -587,7 +631,6 @@ private:
       return false;
     auto &Suppressed = EntitiesStack.back().RefsToSuppress;
     return std::find(Suppressed.begin(), Suppressed.end(), Loc) != Suppressed.end();
-
   }
 
   Expr *getContainingExpr(size_t index) const {
@@ -1320,8 +1363,7 @@ bool IndexSwiftASTWalker::initIndexSymbol(ValueDecl *D, SourceLoc Loc,
 
   if (IsRef) {
     Info.roles |= (unsigned)SymbolRole::Reference;
-    if (auto Container = getContainingDecl())
-      addRelation(Info, (unsigned)SymbolRole::RelationContainedBy, Container);
+    addContainedByRelationIfContained(Info);
   } else {
     Info.roles |= (unsigned)SymbolRole::Definition;
     if (D->isImplicit())
@@ -1427,7 +1469,6 @@ bool IndexSwiftASTWalker::initFuncRefIndexSymbol(ValueDecl *D, SourceLoc Loc,
 bool IndexSwiftASTWalker::initVarRefIndexSymbols(Expr *CurrentE, ValueDecl *D,
                                                  SourceLoc Loc, IndexSymbol &Info,
                                                  Optional<AccessKind> AccKind) {
-
   if (initIndexSymbol(D, Loc, /*IsRef=*/true, Info))
     return true;
 

@@ -82,11 +82,26 @@ public:
 
   /// This method is called when first visiting a decl, before walking into its
   /// children.  If it returns false, the subtree is skipped.
-  virtual bool walkToDeclPre(Decl *D, CharSourceRange Range) { return true; }
+  virtual bool walkToDeclPre(Decl *D, CharSourceRange Range) {
+    beginBalancedDeclVisit(D);
+    return true;
+  }
 
   /// This method is called after visiting the children of a decl. If it returns
   /// false, the remaining traversal is terminated and returns failure.
-  virtual bool walkToDeclPost(Decl *D) { return true; }
+  virtual bool walkToDeclPost(Decl *D) {
+    endBalancedDeclVisit(D);
+    return true;
+  }
+
+  /// This method is called immediately before \c walkToDeclPre. It is guranteed
+  /// to be called in balance with its counterpart \c endBalancedDeclVisit even
+  /// if \c walkToDeclPre returns false.
+  virtual void beginBalancedDeclVisit(Decl *D){};
+
+  /// This method is called immediately after \c walkToDeclPost or after \c
+  /// walkToDeclPre if it returns false.
+  virtual void endBalancedDeclVisit(Decl *D){};
 
   /// This method is called when first visiting a statement, before walking into
   /// its children.  If it returns false, the subtree is skipped.

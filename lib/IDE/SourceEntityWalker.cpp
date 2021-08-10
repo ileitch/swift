@@ -55,10 +55,12 @@ private:
     return SEWalker.shouldWalkIntoGenericParams();
   }
   bool walkToDeclPre(Decl *D) override;
+  bool walkToDeclPreProper(Decl *D);
   std::pair<bool, Expr *> walkToExprPre(Expr *E) override;
   bool walkToTypeReprPre(TypeRepr *T) override;
 
   bool walkToDeclPost(Decl *D) override;
+  bool walkToDeclPostProper(Decl *D);
   Expr *walkToExprPost(Expr *E) override;
   bool walkToTypeReprPost(TypeRepr *T) override;
 
@@ -115,6 +117,20 @@ bool SemaAnnotator::walkToDeclPre(Decl *D) {
     return isa<PatternBindingDecl>(D);
   }
 
+  SEWalker.beginBalancedDeclVisit(D);
+  bool Continue = walkToDeclPreProper(D);
+
+  if (!Continue) {
+    // To satisfy the contract of balanced calls to begin/endBalancedDeclVisit,
+    // we must call endBalancedDeclVisit here if walkToDeclPost isn't going to
+    // be called.
+    SEWalker.endBalancedDeclVisit(D);
+  }
+
+  return Continue;
+}
+
+bool SemaAnnotator::walkToDeclPreProper(Decl *D) {
   if (!handleCustomAttributes(D)) {
     Cancelled = true;
     return false;
@@ -200,6 +216,12 @@ bool SemaAnnotator::walkToDeclPre(Decl *D) {
 }
 
 bool SemaAnnotator::walkToDeclPost(Decl *D) {
+  bool Continue = walkToDeclPostProper(D);
+  SEWalker.endBalancedDeclVisit(D);
+  return Continue;
+}
+
+bool SemaAnnotator::walkToDeclPostProper(Decl *D) {
   if (isDone())
     return false;
 
