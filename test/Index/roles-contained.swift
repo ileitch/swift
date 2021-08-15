@@ -112,6 +112,13 @@ func functionWithGenericClause<T>(type: T) where T: Equatable {}
 // CHECK-NEXT: RelCont | function/Swift | functionWithGenericClause(type:) | {{.*}}
 
 struct SomeStruct {
+    static let selfProperty = Self(a: 1)
+    // CHECK: [[@LINE-1]]:16 | static-property/Swift | selfProperty | {{.*}} | Def,RelChild | rel: 1
+    // CHECK: [[@LINE-2]]:31 | struct/Swift | SomeStruct | {{.*}} | Ref,RelCont | rel: 1
+    // CHECK-NEXT: RelCont | static-property/Swift | selfProperty | {{.*}}
+    // CHECK: [[@LINE-4]]:31 | constructor/Swift | init(a:) | {{.*}} | Ref,Call,RelCont | rel: 1
+    // CHECK-NEXT: RelCont | static-property/Swift | selfProperty | {{.*}}
+
     static let staticProperty: Int = 1
     // CHECK: [[@LINE-1]]:16 | static-property/Swift | staticProperty | {{.*}} | Def,RelChild | rel: 1
     // CHECK: [[@LINE-2]]:32 | struct/Swift | Int | {{.*}} | Ref,RelCont | rel: 1

@@ -35,6 +35,7 @@ class SemaAnnotator : public ASTWalker {
   SourceEntityWalker &SEWalker;
   SmallVector<ConstructorRefCallExpr *, 2> CtorRefs;
   SmallVector<ExtensionDecl *, 2> ExtDecls;
+  SmallVector<NominalTypeDecl *, 6> NominalTypeDeclStack;
   llvm::SmallDenseMap<OpaqueValueExpr *, Expr *, 4> OpaqueValueMap;
   llvm::SmallPtrSet<Expr *, 16> ExprsToSkip;
   bool Cancelled = false;
@@ -43,6 +44,10 @@ class SemaAnnotator : public ASTWalker {
 public:
   explicit SemaAnnotator(SourceEntityWalker &SEWalker)
     : SEWalker(SEWalker) { }
+
+  ~SemaAnnotator() override {
+    assert(Cancelled || NominalTypeDeclStack.empty());
+  }
 
   bool isDone() const { return Cancelled; }
 
@@ -87,6 +92,9 @@ private:
 
   bool passCallArgNames(Expr *Fn, TupleExpr *TupleE);
 
+  void beginBalancedDeclVisit(Decl *D);
+  void endBalancedDeclVisit(Decl *D);
+
   bool shouldIgnore(Decl *D);
 
   ValueDecl *extractDecl(Expr *Fn) const {
@@ -117,14 +125,14 @@ bool SemaAnnotator::walkToDeclPre(Decl *D) {
     return isa<PatternBindingDecl>(D);
   }
 
-  SEWalker.beginBalancedDeclVisit(D);
+  beginBalancedDeclVisit(D);
   bool Continue = walkToDeclPreProper(D);
 
   if (!Continue) {
     // To satisfy the contract of balanced calls to begin/endBalancedDeclVisit,
     // we must call endBalancedDeclVisit here if walkToDeclPost isn't going to
     // be called.
-    SEWalker.endBalancedDeclVisit(D);
+    endBalancedDeclVisit(D);
   }
 
   return Continue;
@@ -217,7 +225,7 @@ bool SemaAnnotator::walkToDeclPreProper(Decl *D) {
 
 bool SemaAnnotator::walkToDeclPost(Decl *D) {
   bool Continue = walkToDeclPostProper(D);
-  SEWalker.endBalancedDeclVisit(D);
+  endBalancedDeclVisit(D);
   return Continue;
 }
 
@@ -237,6 +245,22 @@ bool SemaAnnotator::walkToDeclPostProper(Decl *D) {
   if (!Continue)
     Cancelled = true;
   return Continue;
+}
+
+void SemaAnnotator::beginBalancedDeclVisit(Decl *D) {
+  if (auto NTD = dyn_cast<NominalTypeDecl>(D)) {
+    NominalTypeDeclStack.push_back(NTD);
+  }
+
+  SEWalker.beginBalancedDeclVisit(D);
+}
+
+void SemaAnnotator::endBalancedDeclVisit(Decl *D) {
+  if (!NominalTypeDeclStack.empty() && NominalTypeDeclStack.back() == D) {
+    NominalTypeDeclStack.pop_back();
+  }
+
+  SEWalker.endBalancedDeclVisit(D);
 }
 
 std::pair<bool, Stmt *> SemaAnnotator::walkToStmtPre(Stmt *S) {
@@ -328,8 +352,9 @@ std::pair<bool, Expr *> SemaAnnotator::walkToExprPre(Expr *E) {
     return { false, E };
   };
 
-  if (auto *CtorRefE = dyn_cast<ConstructorRefCallExpr>(E))
+  if (auto *CtorRefE = dyn_cast<ConstructorRefCallExpr>(E)) {
     CtorRefs.push_back(CtorRefE);
+  }
 
   if (auto *DRE = dyn_cast<DeclRefExpr>(E)) {
     auto *FD = dyn_cast<FuncDecl>(DRE->getDecl());
@@ -352,7 +377,7 @@ std::pair<bool, Expr *> SemaAnnotator::walkToExprPre(Expr *E) {
       !isa<SubscriptExpr>(E) &&
       !isa<KeyPathExpr>(E) &&
       E->isImplicit())
-    return { true, E };
+    return {true, E};
 
   if (auto *DRE = dyn_cast<DeclRefExpr>(E)) {
     if (auto *module = dyn_cast<ModuleDecl>(DRE->getDecl())) {
@@ -595,6 +620,14 @@ bool SemaAnnotator::walkToTypeReprPre(TypeRepr *T) {
 
       return passReference(VD, Type(), IdT->getNameLoc(),
                            ReferenceMetaData(SemaReferenceKind::TypeRef, None));
+    }
+  } else if (auto FTR = dyn_cast<FixedTypeRepr>(T)) {
+    if (!NominalTypeDeclStack.empty()) {
+      if (auto NTD = NominalTypeDeclStack.back()) {
+        return passReference(
+            NTD, Type(), DeclNameLoc(FTR->getLoc()),
+            ReferenceMetaData(SemaReferenceKind::TypeRef, None));
+      }
     }
   }
   return true;
